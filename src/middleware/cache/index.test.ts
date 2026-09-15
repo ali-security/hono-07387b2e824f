@@ -543,6 +543,35 @@ describe('Cache Skipping Logic', () => {
     }
   )
 
+  it('Should cache request URLs containing a fragment', async () => {
+    const { mockCache } = stubStoreBackedCache()
+    const app = new Hono()
+    let requestCount = 0
+    app.use('*', cache({ cacheName: 'fragment-request-test', wait: true }))
+    app.get('/', (c) => {
+      requestCount++
+      return c.text(c.req.query('name') ?? 'default')
+    })
+
+    expect(await (await app.request('http://localhost/#?name=probe')).text()).toBe('default')
+    expect(await (await app.request('http://localhost/#?name=probe')).text()).toBe('default')
+    expect(requestCount).toBe(1)
+    expect(mockCache.put).toHaveBeenCalledOnce()
+    expect(mockCache.put.mock.calls[0][0]).toBe('http://localhost/#?name=probe')
+  })
+
+  it('Should not let parameters after a fragment change the cached response', async () => {
+    stubStoreBackedCache()
+    const app = new Hono()
+    app.use('*', cache({ cacheName: 'fragment-poisoning-test', wait: true }))
+    app.get('/', (c) => c.text(c.req.query('name') ?? 'default'))
+
+    // Browsers, proxies and caches drop everything after the '#', so parameters
+    // hidden behind a fragment must not influence the response either.
+    expect(await (await app.request('http://localhost/#?name=probe')).text()).toBe('default')
+    expect(await (await app.request('http://localhost/')).text()).toBe('default')
+  })
+
   it('Should set configured Vary header and cache by the configured request header value', async () => {
     const { mockCache } = stubStoreBackedCache()
     const app = new Hono()
@@ -598,6 +627,34 @@ describe('Cache Skipping Logic', () => {
     expect(await ja.text()).toBe('ja')
     expect(ja.headers.get('X-Count')).toBe('2')
     expect(mockCache.put).toHaveBeenCalledTimes(2)
+  })
+
+  it('Should preserve fragments in custom cache keys', async () => {
+    const { mockCache } = stubStoreBackedCache()
+    const app = new Hono()
+    let requestCount = 0
+    app.use(
+      '/report',
+      cache({
+        cacheName: 'custom-fragment-key-test',
+        wait: true,
+        keyGenerator: (c) => `${c.req.path}#${c.req.header('X-Tenant-Id')}`,
+      })
+    )
+    app.get('/report', (c) => {
+      requestCount++
+      return c.text(`report for ${c.req.header('X-Tenant-Id')}`)
+    })
+
+    const request = (tenant: string) =>
+      app.request('/report', { headers: { 'X-Tenant-Id': tenant } })
+
+    expect(await (await request('acme')).text()).toBe('report for acme')
+    expect(await (await request('globex')).text()).toBe('report for globex')
+    expect(await (await request('acme')).text()).toBe('report for acme')
+    expect(requestCount).toBe(2)
+    expect(mockCache.put).toHaveBeenCalledTimes(2)
+    expect(mockCache.put.mock.calls.map(([key]) => key)).toEqual(['/report#acme', '/report#globex'])
   })
 
   it('Should keep missing and present Vary request header values in separate variants', async () => {
